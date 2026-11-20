@@ -51,7 +51,7 @@ button,input,select,textarea{background:#141f30;color:var(--ink);border-color:#3
 dialog::backdrop{background:#020611bf}
 @media(max-width:600px){
   .bar{min-height:58px}
-  .bar nav{position:fixed;bottom:0;left:0;right:0;z-index:2;display:grid;grid-template-columns:repeat(4,1fr);gap:3px;background:#101827;border-top:1px solid var(--line);padding:7px 5px max(7px,env(safe-area-inset-bottom))}
+  .bar nav{position:fixed;bottom:0;left:0;right:0;z-index:2;display:grid;grid-template-columns:repeat(5,1fr);gap:3px;background:#101827;border-top:1px solid var(--line);padding:7px 5px max(7px,env(safe-area-inset-bottom))}
   nav button{padding:9px 3px;font-size:.83rem}
   main{padding-bottom:86px}
 }
@@ -78,7 +78,7 @@ dialog::backdrop{background:#020611bf}
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand"><span>Reef</span> Log</div><nav aria-label="Main navigation"><button data-view="overview">Overview</button><button data-view="tanks">Tanks</button><button data-view="history">History</button><button data-view="targets">Targets &amp; backup</button></nav></div></header>
+<header><div class="bar"><div class="brand"><span>Reef</span> Log</div><nav aria-label="Main navigation"><button data-view="overview">Overview</button><button data-view="tanks">Tanks</button><button data-view="history">History</button><button data-view="targets">Targets &amp; backup</button><button data-view="account">Account</button></nav></div></header>
 <main id="main"></main>
 <dialog id="entry"><form id="test-form" class="stack"></form></dialog>
 <dialog id="rename-tank" aria-labelledby="rename-title">
@@ -111,6 +111,12 @@ const MIXED_REEF = {
   nh3: {low:null,high:.1,urgentHigh:.5}
 };
 const STORAGE = 'reef-log-v1';
+const CLOUD_URL = 'https://gokemkztwbtuvyfsunml.supabase.co';
+const CLOUD_KEY = 'sb_publishable_BsheAtrv4zxknsyu1ftgLw_-uiJhT3-';
+const REEF_URL = 'https://gbrotan21.github.io/reef-log/';
+let cloudClient;
+let cloud;
+let authMessage = '';
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#entry');
 const form = document.querySelector('#test-form');
@@ -188,10 +194,21 @@ const active = () => PARAMETERS.filter(([key]) => config(key).enabled);
 const parameter = key => PARAMETERS.find(item => item[0] === key);
 
 function saveFleet(next) {
-  localStorage.setItem(STORAGE,JSON.stringify(next));
+  if (cloud) {
+    if (!cloud.ready) throw Error('Cloud log is still loading');
+    cacheCloud(cloud,next,cloud.version,true);
+    cloud.pending = true;
+  } else {
+    localStorage.setItem(STORAGE,JSON.stringify(next));
+  }
+  showFleet(next);
+  loadError = '';
+  if (cloud) void syncCloud(cloud);
+}
+
+function showFleet(next) {
   fleet = next;
   state = fleet.tanks.find(tank => tank.id === fleet.active).log;
-  loadError = '';
 }
 
 function save(next) {
@@ -240,8 +257,9 @@ function render() {
     else button.removeAttribute('aria-current');
   });
   main.innerHTML = (loadError ? '<p class="alert" role="alert">' + esc(loadError) + '</p>' : '') +
-    ({overview,history,targets,tanks}[page])() +
-    '<p class="footer">Your log is stored in this browser. Export a backup from Targets &amp; backup.</p>';
+    ({overview,history,targets,tanks,account}[page])() +
+    (cloud ? '<p class="footer">Manage cloud sync in Account. Export a backup from Targets &amp; backup.</p>' :
+    '<p class="footer">Your log is stored in this browser. Sign in from Account to sync across devices.</p>');
   if (page === 'history') draw();
 }
 
@@ -502,6 +520,7 @@ document.addEventListener('click',event => {
     try { save({...state,readings:state.readings.filter(item => item.id !== button.dataset.delete)}); render(); }
     catch { alert('Could not save the change in this browser.'); }
   }
+  if (button.dataset.cloud) void accountAction(button.dataset.cloud);
   if (button.id === 'export') {
     const url = URL.createObjectURL(new Blob([JSON.stringify(fleet,null,2)],{type:'application/json'}));
     const link = document.createElement('a');
@@ -560,8 +579,187 @@ main.addEventListener('change',async event => {
   catch { message.textContent = 'Could not restore the backup in this browser.'; }
 });
 
+function emptyFleet() {
+  return {version:2,active:'first',tanks:[{id:'first',log:defaults()}]};
+}
+
+function browserFleet() {
+  const saved = localStorage.getItem(STORAGE);
+  return saved ? validateFleet(JSON.parse(saved)) : emptyFleet();
+}
+
+function hasBrowserLog() {
+  try { return localStorage.getItem(STORAGE) !== null; }
+  catch { return false; }
+}
+
+function cacheCloud(current,log,version,pending) {
+  localStorage.setItem(STORAGE + ':cloud:' + current.id,JSON.stringify({log,version,pending}));
+}
+
+function account() {
+  if (!cloud) return `<section class="panel stack"><h1>Account</h1>
+    <p>Sign in to sync your tanks, settings, and readings across devices.</p>
+    <div><button class="primary" data-cloud="signin">Sign in with GitHub</button></div>
+    <p id="cloud-status" role="status">${esc(authMessage)}</p></section>`;
+  const canImport = cloud.ready && !cloud.version && !cloud.pending && hasBrowserLog();
+  return `<section class="panel stack"><h1>Account</h1><p>Signed in with GitHub</p>
+    <p id="cloud-status" role="status">${esc(cloud.message)}</p>
+    <div class="actions">
+      ${canImport ? '<button class="primary" data-cloud="import">Import this browser’s log</button>' : ''}
+      <button data-cloud="sync">Sync now</button>
+      ${cloud.conflict ? '<button data-cloud="reload">Load cloud version</button>' : ''}
+      <button data-cloud="signout">Sign out</button>
+    </div>
+    <p class="muted">The browser log stays separate. Import it to start a new cloud log, or export it while signed out for a backup.</p></section>`;
+}
+
+function refreshAccount() {
+  if (page === 'account') render();
+}
+
+async function loadCloud(current,discardPending = false) {
+  const {data,error} = await cloudClient.from('reef_log_books')
+    .select('version,log').eq('owner_id',current.id).maybeSingle();
+  if (error) throw error;
+  if (cloud !== current || (current.pending && !discardPending)) return;
+  const changed = discardPending || !current.ready || current.version !== (data?.version ?? null);
+  const log = data ? validateFleet(data.log) : emptyFleet();
+  cacheCloud(current,log,data?.version ?? null,false);
+  current.ready = true;
+  current.version = data?.version ?? null;
+  current.message = data ? 'Synced with your account.' :
+    'Your cloud log is empty. You can import this browser’s log or add a new reading.';
+  if (changed) {
+    showFleet(log);
+    if (!dialog.open && !renameDialog.open && !main.querySelector('form:focus-within')) render();
+  }
+}
+
+async function syncCloud(current) {
+  if (cloud !== current || current.busy || current.conflict) return;
+  current.busy = true;
+  const startedPending = current.pending;
+  try {
+    if (!current.pending) {
+      if (!dialog.open && !renameDialog.open && !main.querySelector('form:focus-within')) await loadCloud(current);
+      return;
+    }
+    while (cloud === current && current.pending) {
+      const snapshot = fleet;
+      const nextVersion = crypto.randomUUID();
+      const row = {owner_id:current.id,version:nextVersion,log:snapshot};
+      const table = cloudClient.from('reef_log_books');
+      const result = current.version ? await table.update(row).eq('owner_id',current.id)
+        .eq('version',current.version).select('version').maybeSingle() :
+        await table.insert(row).select('version').single();
+      if (cloud !== current) return;
+      if (result.error?.code === '23505' || (!result.data && !result.error)) {
+        current.conflict = true;
+        current.message = 'The cloud log changed on another device. Export this device’s log before loading the cloud version.';
+        return;
+      }
+      if (result.error) throw result.error;
+      current.version = nextVersion;
+      current.pending = fleet !== snapshot;
+      cacheCloud(current,fleet,current.version,current.pending);
+      current.message = 'Saved to your account.';
+    }
+  } catch(error) {
+    current.message = error?.code === '42501' ?
+      'This GitHub account does not have access to Reef Log cloud storage.' :
+      'Sync is unavailable. Changes saved on this device can be retried from Account.';
+  } finally {
+    current.busy = false;
+    if (cloud === current) {
+      refreshAccount();
+      if (!startedPending && current.pending) void syncCloud(current);
+    }
+  }
+}
+
+async function changeSession(user) {
+  if ((user?.id ?? null) === (cloud?.id ?? null)) return;
+  dialog.close();
+  renameDialog.close();
+  if (!user) {
+    cloud = undefined;
+    try { showFleet(browserFleet()); }
+    catch { showFleet(emptyFleet()); }
+    render();
+    return;
+  }
+  const current = cloud = {id:user.id,ready:false,version:null,pending:false,busy:false,conflict:false,message:'Loading your cloud log…'};
+  showFleet(emptyFleet());
+  try {
+    const cached = JSON.parse(localStorage.getItem(STORAGE + ':cloud:' + current.id) ?? 'null');
+    if (cached) {
+      showFleet(validateFleet(cached.log));
+      current.version = cached.version;
+      current.pending = cached.pending === true;
+      current.ready = true;
+    }
+  } catch { current.message = 'The cached log could not be opened.'; }
+  render();
+  await syncCloud(current);
+}
+
+async function accountAction(action) {
+  try {
+    if (action === 'signin') {
+      if (!cloudClient) throw Error('Cloud sign-in is unavailable. Reload and try again.');
+      const {error} = await cloudClient.auth.signInWithOAuth({provider:'github',options:{redirectTo:REEF_URL}});
+      if (error) throw error;
+    }
+    if (action === 'signout') {
+      if (cloud?.busy) { cloud.message = 'Wait for the current sync before signing out.'; refreshAccount(); return; }
+      const {error} = await cloudClient.auth.signOut({scope:'local'});
+      if (error) throw error;
+    }
+    if (action === 'import' && cloud?.ready && !cloud.version && !cloud.pending) {
+      saveFleet(browserFleet());
+      refreshAccount();
+    }
+    if (action === 'sync' && cloud) await syncCloud(cloud);
+    if (action === 'reload' && cloud?.conflict &&
+        confirm('Replace this device’s unsynced cloud copy with the latest cloud log?')) {
+      const current = cloud;
+      await loadCloud(current,true);
+      if (cloud !== current) return;
+      cloud.pending = false;
+      cloud.conflict = false;
+      refreshAccount();
+    }
+  } catch {
+    if (cloud) cloud.message = 'That action could not be completed. Please try again.';
+    else authMessage = 'Sign-in is unavailable. Please try again.';
+    refreshAccount();
+  }
+}
+
 window.addEventListener('resize',draw);
+window.addEventListener('online',() => { if (cloud) void syncCloud(cloud); });
+window.addEventListener('focus',() => { if (cloud) void syncCloud(cloud); });
 render();
+if (location.href.startsWith(REEF_URL)) {
+  const authParams = new URL(location.href).searchParams;
+  if (authParams.has('code') || authParams.has('error')) {
+    if (authParams.has('error')) authMessage = 'GitHub sign-in did not finish. Please try again.';
+    page = 'account';
+    render();
+  }
+  import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.1/+esm').then(({createClient}) => {
+    cloudClient = createClient(CLOUD_URL,CLOUD_KEY,{auth:{
+      flowType:'pkce',storageKey:'reef-log-github-auth',persistSession:true,detectSessionInUrl:true
+    }});
+    cloudClient.auth.onAuthStateChange((_event,session) => {
+      setTimeout(() => void changeSession(session?.user),0);
+    });
+  }).catch(() => {
+    authMessage = 'Cloud sign-in could not load. Your browser log is available.';
+    refreshAccount();
+  });
+}
 </script>
 </body>
 </html>
