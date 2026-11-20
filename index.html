@@ -119,7 +119,16 @@ let cloud;
 let authMessage = '';
 const PASSWORD_SETUP_KEY = 'reef-log-password-setup';
 let passwordSetupUser = null;
-try { passwordSetupUser = sessionStorage.getItem(PASSWORD_SETUP_KEY); }
+let passwordSetupType = 'recovery';
+try {
+  const stored = sessionStorage.getItem(PASSWORD_SETUP_KEY);
+  if (stored?.startsWith('invite:')) {
+    passwordSetupType = 'invite';
+    passwordSetupUser = stored.slice('invite:'.length);
+  } else {
+    passwordSetupUser = stored;
+  }
+}
 catch { /* Password setup still works for the current page. */ }
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#entry');
@@ -616,6 +625,19 @@ function account() {
     <p>Use your invited email and password. New accounts require an invitation from the Reef Log owner.</p>
     <form id="email-signin" class="stack"><label>Email address<input type="email" name="email" autocomplete="username" required maxlength="254"></label><label>Password<input type="password" name="password" autocomplete="current-password" required></label><div><button class="primary">Sign in</button></div></form>
     <p id="cloud-status" role="status">${esc(authMessage)}</p></section>`;
+  if (passwordSetupUser === cloud.id) {
+    const isInvite = passwordSetupType === 'invite';
+    return `<section class="panel stack"><h1>${isInvite ? 'Create your Reef Log account' : 'Set account password'}</h1>
+      <p>${isInvite ? 'Use the email on your invitation and choose a password.' : 'Choose a new password for this account.'}</p>
+      <form id="set-password" class="stack">
+        <label>Email address<input type="email" name="email" value="${esc(cloud.email)}" autocomplete="username" readonly></label>
+        <label>${isInvite ? 'Password' : 'New password'}<input type="password" name="password" autocomplete="new-password" required minlength="12" aria-describedby="password-requirements"></label>
+        <p class="muted" id="password-requirements">Use at least 12 characters.</p>
+        <div><button class="primary">${isInvite ? 'Create account' : 'Save password'}</button></div>
+      </form>
+      <p id="cloud-status" role="status">${esc(cloud.passwordMessage ?? '')}</p>
+    </section>`;
+  }
   const canImport = cloud.ready && !cloud.version && !cloud.pending && hasBrowserLog();
   return `<section class="panel stack"><h1>Account</h1><p>Signed in as ${esc(cloud.email)}</p>
     <p id="cloud-status" role="status">${esc(cloud.message)}</p>
@@ -625,9 +647,6 @@ function account() {
       ${cloud.conflict ? '<button data-cloud="reload">Load cloud version</button>' : ''}
       <button data-cloud="signout">Sign out</button>
     </div>
-    ${passwordSetupUser === cloud.id ? `<form id="set-password" class="stack"><h2>Set account password</h2>
-    <label>New password<input type="password" name="password" autocomplete="new-password" required minlength="12"></label>
-    <div><button class="primary">Save password</button></div></form>` : ''}
     <p class="muted">The browser log stays separate. Import it to start a new cloud log, or export it while signed out for a backup.</p></section>`;
 }
 
@@ -689,7 +708,7 @@ async function syncCloud(current) {
   } finally {
     current.busy = false;
     if (cloud === current) {
-      refreshAccount();
+      if (!main.querySelector('#set-password:focus-within')) refreshAccount();
       if (!startedPending && current.pending) void syncCloud(current);
     }
   }
@@ -738,10 +757,11 @@ async function signInWithEmail(form) {
   } finally { button.disabled = false; }
 }
 
-function setPasswordSetup(userId) {
+function setPasswordSetup(userId,type = 'recovery') {
   passwordSetupUser = userId;
+  passwordSetupType = type;
   try {
-    if (userId) sessionStorage.setItem(PASSWORD_SETUP_KEY,userId);
+    if (userId) sessionStorage.setItem(PASSWORD_SETUP_KEY,type === 'invite' ? 'invite:' + userId : userId);
     else sessionStorage.removeItem(PASSWORD_SETUP_KEY);
   } catch { /* Keep the current-page state if session storage is unavailable. */ }
 }
@@ -757,7 +777,7 @@ async function setAccountPassword(form) {
     setPasswordSetup(null);
     current.message = 'Password saved. Use your email and password next time.';
   } catch {
-    current.message = 'Could not save the password. Reopen your invitation or sign in again.';
+    current.passwordMessage = 'Could not save that password. Try again.';
   } finally {
     button.disabled = false;
     if (cloud === current) refreshAccount();
@@ -768,7 +788,7 @@ async function redeemInvite(token,type) {
   try {
     const {data,error} = await cloudClient.auth.verifyOtp({token_hash:token,type});
     if (error || !data.user) throw error ?? Error('Missing verified account');
-    setPasswordSetup(data.user.id);
+    setPasswordSetup(data.user.id,type);
     authMessage = '';
   } catch {
     authMessage = 'This link has expired or was already used. Ask for a new link.';
