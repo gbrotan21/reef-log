@@ -76,6 +76,16 @@ dialog::backdrop{background:#020611bf}
 .danger{color:#ffadb7;border-color:#714052}
 .danger:hover{background:#422633}
 </style>
+<script>
+(() => {
+  const current = new URL(location.href);
+  if (current.searchParams.get('local') === '1') return;
+  const next = new URL('https://reeflog.github.io/');
+  next.search = current.search;
+  next.hash = current.hash;
+  location.replace(next.href);
+})();
+</script>
 </head>
 <body>
 <header><div class="bar"><div class="brand"><span>Reef</span> Log</div><nav aria-label="Main navigation"><button data-view="overview">Overview</button><button data-view="tanks">Tanks</button><button data-view="history">History</button><button data-view="targets">Targets &amp; backup</button><button data-view="account">Account</button></nav></div></header>
