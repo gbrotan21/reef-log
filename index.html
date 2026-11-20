@@ -117,6 +117,10 @@ const REEF_URL = 'https://gbrotan21.github.io/reef-log/';
 let cloudClient;
 let cloud;
 let authMessage = '';
+const PASSWORD_SETUP_KEY = 'reef-log-password-setup';
+let passwordSetupUser = null;
+try { passwordSetupUser = sessionStorage.getItem(PASSWORD_SETUP_KEY); }
+catch { /* Password setup still works for the current page. */ }
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#entry');
 const form = document.querySelector('#test-form');
@@ -621,9 +625,9 @@ function account() {
       ${cloud.conflict ? '<button data-cloud="reload">Load cloud version</button>' : ''}
       <button data-cloud="signout">Sign out</button>
     </div>
-    <form id="set-password" class="stack"><h2>Set account password</h2>
+    ${passwordSetupUser === cloud.id ? `<form id="set-password" class="stack"><h2>Set account password</h2>
     <label>New password<input type="password" name="password" autocomplete="new-password" required minlength="12"></label>
-    <div><button class="primary">Save password</button></div></form>
+    <div><button class="primary">Save password</button></div></form>` : ''}
     <p class="muted">The browser log stays separate. Import it to start a new cloud log, or export it while signed out for a backup.</p></section>`;
 }
 
@@ -734,13 +738,23 @@ async function signInWithEmail(form) {
   } finally { button.disabled = false; }
 }
 
+function setPasswordSetup(userId) {
+  passwordSetupUser = userId;
+  try {
+    if (userId) sessionStorage.setItem(PASSWORD_SETUP_KEY,userId);
+    else sessionStorage.removeItem(PASSWORD_SETUP_KEY);
+  } catch { /* Keep the current-page state if session storage is unavailable. */ }
+}
+
 async function setAccountPassword(form) {
   const current = cloud;
+  if (!current || passwordSetupUser !== current.id) return;
   const button = form.querySelector('button');
   button.disabled = true;
   try {
     const {error} = await cloudClient.auth.updateUser({password:new FormData(form).get('password')});
     if (error) throw error;
+    setPasswordSetup(null);
     current.message = 'Password saved. Use your email and password next time.';
   } catch {
     current.message = 'Could not save the password. Reopen your invitation or sign in again.';
@@ -751,8 +765,14 @@ async function setAccountPassword(form) {
 }
 
 async function redeemInvite(token,type) {
-  const {error} = await cloudClient.auth.verifyOtp({token_hash:token,type});
-  authMessage = error ? 'This link has expired or was already used. Ask for a new link.' : '';
+  try {
+    const {data,error} = await cloudClient.auth.verifyOtp({token_hash:token,type});
+    if (error || !data.user) throw error ?? Error('Missing verified account');
+    setPasswordSetup(data.user.id);
+    authMessage = '';
+  } catch {
+    authMessage = 'This link has expired or was already used. Ask for a new link.';
+  }
   refreshAccount();
 }
 
@@ -762,6 +782,7 @@ async function accountAction(action) {
       if (cloud?.busy) { cloud.message = 'Wait for the current sync before signing out.'; refreshAccount(); return; }
       const {error} = await cloudClient.auth.signOut({scope:'local'});
       if (error) throw error;
+      setPasswordSetup(null);
     }
     if (action === 'import' && cloud?.ready && !cloud.version && !cloud.pending) {
       saveFleet(browserFleet());
