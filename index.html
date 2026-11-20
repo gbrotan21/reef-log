@@ -55,6 +55,23 @@ dialog::backdrop{background:#020611bf}
   nav button{padding:9px 3px;font-size:.83rem}
   main{padding-bottom:86px}
 }
+
+.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.summary>div{display:flex;align-items:center;gap:7px;flex-wrap:wrap;background:#121c2b;border:1px solid var(--line);border-radius:12px;padding:10px 13px;font-size:.88rem}
+.summary strong{font-size:1.25rem}
+.reading-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,290px),1fr))}
+.reading-card{gap:10px;border-left:3px solid #3d5066}
+.reading-card[data-status=red]{border-left-color:#ff6c79}
+.reading-card[data-status=yellow]{border-left-color:#f7c754}
+.reading-card[data-status=green]{border-left-color:#4dd99b}
+.reading-head,.reading-meta{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 12px}
+.reading-head h3{color:var(--ink)}
+.reading-meta{font-size:.84rem;color:var(--muted)}
+.reading-card .value{font-size:2.2rem;line-height:1.1}
+.reading-card .indicator{font-size:.82rem}
+.reading-card .next-step{margin:0}
+.source-links{display:grid;gap:8px}.source-links a{color:#71e5f2}
+@media(max-width:460px){.summary>div{padding:8px;column-gap:6px}.summary>div>span:last-child{width:100%;font-size:.78rem}.reading-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -69,6 +86,19 @@ const PARAMETERS = [
   ['ca','Calcium','ppm'], ['mg','Magnesium','ppm'], ['no2','Nitrite','ppm'],
   ['si','Silicate','ppm'], ['nh3','Ammonia','ppm']
 ];
+// Inclusive healthy limits. Urgent limits are conservative retest triggers.
+const MIXED_REEF = {
+  alk: {low:7.5,high:10,urgentLow:6,urgentHigh:13},
+  salt:{low:34,high:36,urgentLow:32,urgentHigh:38},
+  ph:  {low:7.8,high:8.4,urgentLow:7.7,urgentHigh:8.6},
+  no3: {low:1,high:10,urgentHigh:50},
+  po4: {low:.02,high:.12},
+  ca:  {low:400,high:480,urgentLow:350,urgentHigh:550},
+  mg:  {low:1250,high:1400,urgentLow:1100,urgentHigh:1650},
+  no2: {low:null,high:.2},
+  si:  {low:null,high:2},
+  nh3: {low:null,high:.1,urgentHigh:.5}
+};
 const STORAGE = 'reef-log-v1';
 const main = document.querySelector('#main');
 const dialog = document.querySelector('#entry');
@@ -128,7 +158,18 @@ function validate(data) {
 const esc = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const format = value => Number(value).toLocaleString(undefined,{maximumFractionDigits:12});
 const dateText = value => new Date(value).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});
-const config = key => state.settings[key] ?? {enabled:!['no2','si','nh3'].includes(key),low:null,high:null,days:null};
+function config(key) {
+  const stored = state.settings[key];
+  const profile = MIXED_REEF[key];
+  return {
+    enabled: stored?.enabled ?? !['no2','si'].includes(key),
+    low: stored?.low ?? (stored?.high != null ? null : profile.low),
+    high: stored?.high ?? (stored?.low != null ? null : profile.high),
+    days: stored?.days ?? null,
+    urgentLow:profile.urgentLow,
+    urgentHigh:profile.urgentHigh
+  };
+}
 const records = key => state.readings.filter(row => row.key === key).sort((a,b) => b.date.localeCompare(a.date));
 const active = () => PARAMETERS.filter(([key]) => config(key).enabled);
 const parameter = key => PARAMETERS.find(item => item[0] === key);
@@ -158,13 +199,15 @@ function range({low,high},unit) {
   return 'Target ' + bounds + (unit ? ' ' + unit : '');
 }
 
-function assess(reading,{low,high,days}) {
-  if (!reading) return {label:'No readings',tone:'',due:false,direction:''};
-  const direction = low !== null && reading.value < low ? 'Below' : high !== null && reading.value > high ? 'Above' : '';
+function assess(reading,{low,high,days,urgentLow,urgentHigh}) {
+  if (!reading) return {label:'No reading',color:'gray',due:false,direction:''};
+  const {value} = reading;
+  const urgentDirection = urgentLow !== undefined && value <= urgentLow ? 'Below' : urgentHigh !== undefined && value >= urgentHigh ? 'Above' : '';
+  const direction = urgentDirection || (low !== null && value < low ? 'Below' : high !== null && value > high ? 'Above' : '');
   const due = days !== null && Date.now() - Date.parse(reading.date) >= days * 86400000;
-  if (direction) return {label:direction + ' target',tone:'warn',due,direction};
-  if (low === null && high === null) return {label:'Target unset',tone:'',due,direction};
-  return {label:'In range',tone:'good',due,direction};
+  if (urgentDirection) return {label:'Fix immediately',color:'red',due,direction};
+  if (direction || due) return {label:'Needs attention',color:'yellow',due,direction};
+  return {label:'Healthy',color:'green',due,direction:''};
 }
 
 function render() {
@@ -203,13 +246,20 @@ const NEXT_STEPS = {
 };
 
 function nextStep(item) {
+  if (item.color === 'red') {
+    const cutoff = item.direction === 'Below' ? item.setting.urgentLow : item.setting.urgentHigh;
+    return 'Urgent ' + (item.direction === 'Below' ? 'low' : 'high') + ' reading. Retest now (cutoff ' + format(cutoff) + '). If confirmed, check livestock and address the cause promptly. ' +
+      NEXT_STEPS[item.key][item.direction === 'Below' ? 0 : 1];
+  }
+  if (item.key === 'nh3' && item.direction && /FX203/i.test(item.reading.note) && item.reading.value <= .2) {
+    return 'Above the total ammonia target and near this kit’s detection limit. Confirm with a fresh sample and a suitable low-range test.';
+  }
   if (item.direction) {
     const bound = item.direction === 'Below' ? item.setting.low : item.setting.high;
-    return item.label + ' (' + format(bound) + (item.unit ? ' ' + item.unit : '') + ' limit). Retest to confirm. ' +
+    return item.direction + ' target of ' + format(bound) + (item.unit ? ' ' + item.unit : '') + '. Retest to confirm. ' +
       NEXT_STEPS[item.key][item.direction === 'Below' ? 0 : 1];
   }
   if (item.due) return 'The last test is overdue. Log a fresh reading.';
-  if (item.reading && item.label === 'Target unset') return 'Set a target range to evaluate this reading.';
   return '';
 }
 
@@ -217,24 +267,23 @@ function overview() {
   const items = active().map(([key,name,unit]) => {
     const setting = config(key);
     const reading = records(key)[0];
-    const result = assess(reading,setting);
-    const color = !reading ? 'gray' : result.direction ? 'red' : result.due || result.label === 'Target unset' ? 'yellow' : 'green';
-    return {key,name,unit,reading,setting,color,...result};
+    return {key,name,unit,reading,setting,...assess(reading,setting)};
   });
-  const issues = items.filter(item => item.direction || item.due);
-  return `<section class="hero"><div><h1>${esc(state.name)}</h1><p>Water tests and target ranges</p></div><button class="primary" data-add>Add water test</button></section>
-  <section><div class="section-head"><h2>Attention</h2></div><div class="panel attention">${issues.length ? issues.map(item =>
-    `<div><strong>${item.name}</strong> · ${item.direction ? `${item.label} at ${format(item.reading.value)} ${item.unit}. ${range(item.setting,item.unit)}. Retest to confirm before adjusting.` : 'Due for a test.'}
-    ${item.direction && item.due ? 'Also due for a test.' : ''}</div>`).join('') :
-    items.some(item => item.reading && item.label === 'In range') ? 'No recorded readings are flagged.' : 'Set targets and log a water test to check your readings.'}</div></section>
-  <section><div class="section-head"><h2>Latest readings</h2><button data-view="targets">Edit targets</button></div>
-    <div class="grid">${items.map(item => `<article class="card"><h3>${item.name}</h3>
+  const order = ['red','yellow','green','gray'];
+  items.sort((a,b) => order.indexOf(a.color) - order.indexOf(b.color));
+  const count = color => items.filter(item => item.color === color).length;
+  return `<section class="hero"><div><h1>${esc(state.name)}</h1><p>Water parameters</p></div><button class="primary" data-add>Add water test</button></section>
+  <section aria-label="Reading summary" class="summary">
+    ${[['green','Healthy'],['yellow','Needs attention'],['red','Fix immediately']].map(([color,label]) =>
+      `<div><span class="dot ${color}" aria-hidden="true"></span><strong>${count(color)}</strong><span>${label}</span></div>`).join('')}
+  </section>
+  <section><div class="section-head"><h2>Latest readings</h2><button data-view="targets">View targets</button></div>
+    <div class="grid reading-grid">${items.map(item => `<article class="card reading-card" data-status="${item.color}">
+      <div class="reading-head"><h3>${item.name}</h3><span class="indicator"><span class="dot ${item.color}" aria-hidden="true"></span>${item.label}</span></div>
       <div class="value">${item.reading ? format(item.reading.value) : '—'} <span class="unit">${item.unit}</span></div>
-      <span class="indicator"><span aria-hidden="true" class="dot ${item.color}"></span>${item.due && !item.direction ? 'Retest due' : item.label}</span>
-      <p class="muted">${range(item.setting,item.unit)}${item.due ? ' · Test due' : ''}</p>
-      ${item.reading ? `<p class="muted">${dateText(item.reading.date)}</p>` : ''}
-      <button data-history="${item.key}">View history</button>
-      ${nextStep(item) ? `<p class="next-step">${nextStep(item)}</p>` : ''}</article>`).join('') || '<p>Enable a parameter in Targets &amp; backup to get started.</p>'}</div>
+      <div class="reading-meta"><span>${range(item.setting,item.unit)}</span>${item.reading ? `<time datetime="${item.reading.date}">${dateText(item.reading.date)}</time>` : ''}</div>
+      ${nextStep(item) ? `<p class="next-step">${nextStep(item)}</p>` : ''}
+      <button data-history="${item.key}">View history</button></article>`).join('') || '<p>Enable a parameter under Targets &amp; backup to get started.</p>'}</div>
   </section>`;
 }
 
@@ -301,18 +350,29 @@ function draw() {
   }
 }
 
+function urgentText({urgentLow,urgentHigh}) {
+  return [urgentLow === undefined ? '' : '≤ ' + format(urgentLow),
+    urgentHigh === undefined ? '' : '≥ ' + format(urgentHigh)].filter(Boolean).join(' or ') || 'No preset cutoff';
+}
+
 function targets() {
   return `<section class="stack"><h1>Targets</h1><form id="targets-form" class="panel stack">
     <label>Tank name<input name="name" required maxlength="60" value="${esc(state.name)}"></label>
-    <p class="muted">Set the minimum, maximum, or both for your tank. Set a test interval to flag overdue readings on the overview.</p>
+    <p class="muted">Healthy ranges start with mixed-reef defaults. Outside the healthy range is Needs attention. The urgent cutoffs are app defaults for immediate confirmation, and livestock needs vary. Use a test interval to flag overdue readings.</p>
     ${PARAMETERS.map(([key,name,unit]) => {
       const {low,high,days,enabled} = config(key);
       return `<div class="settings-row"><label class="check"><input name="${key}-enabled" type="checkbox" ${enabled?'checked':''}> Show ${name} ${unit ? '('+unit+')' : ''}</label>
       <div class="fields"><label>Minimum<input name="${key}-low" type="number" step="any" value="${low ?? ''}"></label>
       <label>Maximum<input name="${key}-high" type="number" step="any" value="${high ?? ''}"></label>
-      <label>Test interval (days)<input name="${key}-days" type="number" min="1" max="3650" step="1" value="${days ?? ''}"></label></div></div>`;
+      <label>Test interval (days)<input name="${key}-days" type="number" min="1" max="3650" step="1" value="${days ?? ''}"></label></div><p class="muted">Fix immediately · ${urgentText(config(key))}</p></div>`;
     }).join('')}
     <div><button class="primary">Save targets</button></div><p role="status" id="settings-message"></p></form></section>
+    <section class="panel stack"><h2>About the mixed-reef targets</h2>
+    <p>Use these as starting points for an established mixed reef. Nutrient goals vary with coral mix and feeding. Enter total ammonia for the ammonia check. Nitrite and silicate use attention alerts as trends to investigate.</p>
+    <p class="muted">Retest surprising results with a suitable kit before changing the tank. If the last test was days ago, take a fresh sample to see where the tank stands today.</p>
+    <div class="source-links"><a href="https://g1.redseafish.com/reef-care-recipes/">Red Sea reef care recipes</a>
+    <a href="https://www.reef2reef.com/ams/optimal-parameters-for-a-coral-reef-aquarium-by-randy-holmes-farley.79/">Holmes-Farley’s reef chemistry guide</a>
+    <a href="https://www.reef2reef.com/ams/ammonia-is-our-friend.1062/">Holmes-Farley on total ammonia</a></div></section>
     <section class="panel stack"><h2>Backup</h2><p>Export all tanks, readings, and targets or restore them from a backup file.</p>
     <div class="actions"><button id="export">Export backup</button><button id="import">Restore backup</button><input hidden id="backup" type="file" accept=".json,application/json"></div>
     <p role="status" id="backup-message"></p></section>`;
