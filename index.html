@@ -531,6 +531,16 @@ document.addEventListener('click',event => {
 });
 
 main.addEventListener('submit',event => {
+  if (event.target.id === 'set-password') {
+    event.preventDefault();
+    void setAccountPassword(event.target);
+    return;
+  }
+  if (event.target.id === 'email-signin') {
+    event.preventDefault();
+    void signInWithEmail(event.target);
+    return;
+  }
   if (event.target.id === 'tank-form') {
     event.preventDefault();
     const name = new FormData(event.target).get('name').trim();
@@ -599,11 +609,11 @@ function cacheCloud(current,log,version,pending) {
 
 function account() {
   if (!cloud) return `<section class="panel stack"><h1>Account</h1>
-    <p>Sign in to sync your tanks, settings, and readings across devices.</p>
-    <div><button class="primary" data-cloud="signin">Sign in with GitHub</button></div>
+    <p>Use your invited email and password. New accounts require an invitation from the Reef Log owner.</p>
+    <form id="email-signin" class="stack"><label>Email address<input type="email" name="email" autocomplete="username" required maxlength="254"></label><label>Password<input type="password" name="password" autocomplete="current-password" required></label><div><button class="primary">Sign in</button></div></form>
     <p id="cloud-status" role="status">${esc(authMessage)}</p></section>`;
   const canImport = cloud.ready && !cloud.version && !cloud.pending && hasBrowserLog();
-  return `<section class="panel stack"><h1>Account</h1><p>Signed in with GitHub</p>
+  return `<section class="panel stack"><h1>Account</h1><p>Signed in as ${esc(cloud.email)}</p>
     <p id="cloud-status" role="status">${esc(cloud.message)}</p>
     <div class="actions">
       ${canImport ? '<button class="primary" data-cloud="import">Import this browser’s log</button>' : ''}
@@ -611,6 +621,9 @@ function account() {
       ${cloud.conflict ? '<button data-cloud="reload">Load cloud version</button>' : ''}
       <button data-cloud="signout">Sign out</button>
     </div>
+    <form id="set-password" class="stack"><h2>Set account password</h2>
+    <label>New password<input type="password" name="password" autocomplete="new-password" required minlength="12"></label>
+    <div><button class="primary">Save password</button></div></form>
     <p class="muted">The browser log stays separate. Import it to start a new cloud log, or export it while signed out for a backup.</p></section>`;
 }
 
@@ -667,7 +680,7 @@ async function syncCloud(current) {
     }
   } catch(error) {
     current.message = error?.code === '42501' ?
-      'This GitHub account does not have access to Reef Log cloud storage.' :
+      'This account does not have access to Reef Log cloud storage.' :
       'Sync is unavailable. Changes saved on this device can be retried from Account.';
   } finally {
     current.busy = false;
@@ -689,7 +702,7 @@ async function changeSession(user) {
     render();
     return;
   }
-  const current = cloud = {id:user.id,ready:false,version:null,pending:false,busy:false,conflict:false,message:'Loading your cloud log…'};
+  const current = cloud = {id:user.id,email:user.email ?? 'your account',ready:false,version:null,pending:false,busy:false,conflict:false,message:'Loading your cloud log…'};
   showFleet(emptyFleet());
   try {
     const cached = JSON.parse(localStorage.getItem(STORAGE + ':cloud:' + current.id) ?? 'null');
@@ -704,13 +717,47 @@ async function changeSession(user) {
   await syncCloud(current);
 }
 
+async function signInWithEmail(form) {
+  const data = new FormData(form);
+  const button = form.querySelector('button');
+  button.disabled = true;
+  try {
+    if (!cloudClient) throw Error('Authentication unavailable');
+    const {error} = await cloudClient.auth.signInWithPassword({
+      email:data.get('email').trim(),password:data.get('password')
+    });
+    if (error) throw error;
+  } catch(error) {
+    authMessage = error?.status === 429 ? 'Too many attempts. Wait a minute and try again.' :
+      'Sign-in failed. Check your invited email and password.';
+    refreshAccount();
+  } finally { button.disabled = false; }
+}
+
+async function setAccountPassword(form) {
+  const current = cloud;
+  const button = form.querySelector('button');
+  button.disabled = true;
+  try {
+    const {error} = await cloudClient.auth.updateUser({password:new FormData(form).get('password')});
+    if (error) throw error;
+    current.message = 'Password saved. Use your email and password next time.';
+  } catch {
+    current.message = 'Could not save the password. Reopen your invitation or sign in again.';
+  } finally {
+    button.disabled = false;
+    if (cloud === current) refreshAccount();
+  }
+}
+
+async function redeemInvite(token,type) {
+  const {error} = await cloudClient.auth.verifyOtp({token_hash:token,type});
+  authMessage = error ? 'This link has expired or was already used. Ask for a new link.' : '';
+  refreshAccount();
+}
+
 async function accountAction(action) {
   try {
-    if (action === 'signin') {
-      if (!cloudClient) throw Error('Cloud sign-in is unavailable. Reload and try again.');
-      const {error} = await cloudClient.auth.signInWithOAuth({provider:'github',options:{redirectTo:REEF_URL}});
-      if (error) throw error;
-    }
     if (action === 'signout') {
       if (cloud?.busy) { cloud.message = 'Wait for the current sync before signing out.'; refreshAccount(); return; }
       const {error} = await cloudClient.auth.signOut({scope:'local'});
@@ -743,8 +790,13 @@ window.addEventListener('focus',() => { if (cloud) void syncCloud(cloud); });
 render();
 if (location.href.startsWith(REEF_URL)) {
   const authParams = new URL(location.href).searchParams;
-  if (authParams.has('code') || authParams.has('error')) {
-    if (authParams.has('error')) authMessage = 'GitHub sign-in did not finish. Please try again.';
+  const link = new URLSearchParams(location.hash.slice(1));
+  const token = link.get('token_hash');
+  const linkType = link.get('type');
+  const redeem = /^[A-Za-z0-9_-]{40,128}$/.test(token ?? '') && ['invite','recovery'].includes(linkType);
+  if (redeem) window.history.replaceState(null,'',location.pathname + location.search);
+  if (redeem || authParams.has('code') || authParams.has('error')) {
+    authMessage = redeem ? 'Checking your invitation…' : 'Opening your account…';
     page = 'account';
     render();
   }
@@ -755,6 +807,7 @@ if (location.href.startsWith(REEF_URL)) {
     cloudClient.auth.onAuthStateChange((_event,session) => {
       setTimeout(() => void changeSession(session?.user),0);
     });
+    if (redeem) void redeemInvite(token,linkType);
   }).catch(() => {
     authMessage = 'Cloud sign-in could not load. Your browser log is available.';
     refreshAccount();
@@ -763,3 +816,4 @@ if (location.href.startsWith(REEF_URL)) {
 </script>
 </body>
 </html>
+
