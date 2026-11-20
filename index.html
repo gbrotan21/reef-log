@@ -117,6 +117,7 @@ const REEF_URL = 'https://gbrotan21.github.io/reef-log/';
 let cloudClient;
 let cloud;
 let authMessage = '';
+let sharedInvite = null;
 const PASSWORD_SETUP_KEY = 'reef-log-password-setup';
 let passwordSetupUser = null;
 let passwordSetupType = 'recovery';
@@ -544,6 +545,11 @@ document.addEventListener('click',event => {
 });
 
 main.addEventListener('submit',event => {
+  if (event.target.id === 'shared-signup') {
+    event.preventDefault();
+    void signUpWithSharedInvite(event.target);
+    return;
+  }
   if (event.target.id === 'set-password') {
     event.preventDefault();
     void setAccountPassword(event.target);
@@ -621,6 +627,16 @@ function cacheCloud(current,log,version,pending) {
 }
 
 function account() {
+  if (!cloud && sharedInvite) return `<section class="panel stack"><h1>Create your Reef Log account</h1>
+    <p>Enter your email and choose a password to save your tank logs.</p>
+    <form id="shared-signup" class="stack">
+      <label>Email address<input type="email" name="email" autocomplete="username" required maxlength="254"></label>
+      <label>Password<input type="password" name="password" autocomplete="new-password" required minlength="12" maxlength="72" aria-describedby="signup-password-rules"></label>
+      <p class="muted" id="signup-password-rules">Use at least 12 characters. Keep your password handy since email is not verified.</p>
+      <div><button class="primary">Create account</button></div>
+    </form>
+    <p id="cloud-status" role="status">${esc(authMessage)}</p>
+    <div><button data-cloud="show-signin">Already have an account? Sign in</button></div></section>`;
   if (!cloud) return `<section class="panel stack"><h1>Account</h1>
     <p>Use your invited email and password. New accounts require an invitation from the Reef Log owner.</p>
     <form id="email-signin" class="stack"><label>Email address<input type="email" name="email" autocomplete="username" required maxlength="254"></label><label>Password<input type="password" name="password" autocomplete="current-password" required></label><div><button class="primary">Sign in</button></div></form>
@@ -740,6 +756,44 @@ async function changeSession(user) {
   await syncCloud(current);
 }
 
+function finishSharedInvite() {
+  sharedInvite = null;
+  if (new URLSearchParams(location.hash.slice(1)).has('join')) {
+    window.history.replaceState(null,'',location.pathname + location.search);
+  }
+}
+
+async function signUpWithSharedInvite(form) {
+  const data = new FormData(form);
+  const email = data.get('email').trim();
+  const password = data.get('password');
+  const button = form.querySelector('button');
+  const status = document.querySelector('#cloud-status');
+  const invite = sharedInvite;
+  if (!invite) return;
+  button.disabled = true;
+  status.textContent = 'Creating your account…';
+  try {
+    if (!cloudClient) throw Error('Sign-up is loading. Try again in a moment.');
+    const response = await fetch(CLOUD_URL + '/functions/v1/reef-log-join',{
+      method:'POST',
+      headers:{apikey:CLOUD_KEY,'Content-Type':'application/json'},
+      body:JSON.stringify({invite,email,password})
+    });
+    const result = await response.json();
+    if (!response.ok || !result.created) throw Error(result.error || 'Could not create the account.');
+    const {error} = await cloudClient.auth.signInWithPassword({email,password});
+    finishSharedInvite();
+    authMessage = error ? 'Account created. Sign in with the email and password you just set.' : '';
+    refreshAccount();
+  } catch(error) {
+    authMessage = error?.message || 'Could not create the account. Try again.';
+    status.textContent = authMessage;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function signInWithEmail(form) {
   const data = new FormData(form);
   const button = form.querySelector('button');
@@ -798,6 +852,11 @@ async function redeemInvite(token,type) {
 
 async function accountAction(action) {
   try {
+    if (action === 'show-signin') {
+      finishSharedInvite();
+      authMessage = '';
+      refreshAccount();
+    }
     if (action === 'signout') {
       if (cloud?.busy) { cloud.message = 'Wait for the current sync before signing out.'; refreshAccount(); return; }
       const {error} = await cloudClient.auth.signOut({scope:'local'});
@@ -842,6 +901,15 @@ if (location.href.startsWith(REEF_URL)) {
     render();
     return {token,type};
   }
+  function openSharedInvite() {
+    const invite = new URLSearchParams(location.hash.slice(1)).get('join');
+    if (!/^[A-Za-z0-9_-]{43}$/.test(invite ?? '')) return;
+    sharedInvite = invite;
+    authMessage = '';
+    page = 'account';
+    render();
+  }
+  openSharedInvite();
   let invitation = readInviteLink();
   if (!invitation && (authParams.has('code') || authParams.has('error'))) {
     authMessage = 'Opening your account…';
@@ -849,6 +917,7 @@ if (location.href.startsWith(REEF_URL)) {
     render();
   }
   window.addEventListener('hashchange',() => {
+    openSharedInvite();
     const next = readInviteLink();
     if (!next) return;
     invitation = next;
