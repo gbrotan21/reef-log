@@ -257,7 +257,7 @@ function render() {
     else button.removeAttribute('aria-current');
   });
   main.innerHTML = (loadError ? '<p class="alert" role="alert">' + esc(loadError) + '</p>' : '') +
-    ({overview,history,targets,tanks,account}[page])() +
+    ({overview,history:historyView,targets,tanks,account}[page])() +
     (cloud ? '<p class="footer">Manage cloud sync in Account. Export a backup from Targets &amp; backup.</p>' :
     '<p class="footer">Your log is stored in this browser. Sign in from Account to sync across devices.</p>');
   if (page === 'history') draw();
@@ -331,7 +331,7 @@ function overview() {
   </section>`;
 }
 
-function history() {
+function historyView() {
   const [key,name,unit] = parameter(selected);
   const readings = records(key);
   return `<section><div class="section-head"><h1>History</h1><button class="primary" data-add="${key}">Add water test</button></div>
@@ -790,16 +790,29 @@ window.addEventListener('focus',() => { if (cloud) void syncCloud(cloud); });
 render();
 if (location.href.startsWith(REEF_URL)) {
   const authParams = new URL(location.href).searchParams;
-  const link = new URLSearchParams(location.hash.slice(1));
-  const token = link.get('token_hash');
-  const linkType = link.get('type');
-  const redeem = /^[A-Za-z0-9_-]{40,128}$/.test(token ?? '') && ['invite','recovery'].includes(linkType);
-  if (redeem) window.history.replaceState(null,'',location.pathname + location.search);
-  if (redeem || authParams.has('code') || authParams.has('error')) {
-    authMessage = redeem ? 'Checking your invitation…' : 'Opening your account…';
+  function readInviteLink() {
+    const link = new URLSearchParams(location.hash.slice(1));
+    const token = link.get('token_hash');
+    const type = link.get('type');
+    if (!/^[A-Za-z0-9_-]{40,128}$/.test(token ?? '') || !['invite','recovery'].includes(type)) return null;
+    window.history.replaceState(null,'',location.pathname + location.search);
+    authMessage = 'Checking your invitation…';
+    page = 'account';
+    render();
+    return {token,type};
+  }
+  let invitation = readInviteLink();
+  if (!invitation && (authParams.has('code') || authParams.has('error'))) {
+    authMessage = 'Opening your account…';
     page = 'account';
     render();
   }
+  window.addEventListener('hashchange',() => {
+    const next = readInviteLink();
+    if (!next) return;
+    invitation = next;
+    if (cloudClient) void redeemInvite(next.token,next.type);
+  });
   import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.1/+esm').then(({createClient}) => {
     cloudClient = createClient(CLOUD_URL,CLOUD_KEY,{auth:{
       flowType:'pkce',storageKey:'reef-log-github-auth',persistSession:true,detectSessionInUrl:true
@@ -807,7 +820,7 @@ if (location.href.startsWith(REEF_URL)) {
     cloudClient.auth.onAuthStateChange((_event,session) => {
       setTimeout(() => void changeSession(session?.user),0);
     });
-    if (redeem) void redeemInvite(token,linkType);
+    if (invitation) void redeemInvite(invitation.token,invitation.type);
   }).catch(() => {
     authMessage = 'Cloud sign-in could not load. Your browser log is available.';
     refreshAccount();
